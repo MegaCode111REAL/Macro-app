@@ -21,10 +21,16 @@ class ImageDetector:
         self.capture = capture or ScreenCapture()
 
     def find_matches(self, template_path: Path, threshold: float = 0.8, max_results: int = 5) -> list[MatchResult]:
+        threshold = max(0.0, min(1.0, float(threshold)))
+        max_results = max(1, int(max_results))
+
         screen = self.capture.capture()
         template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
         if template is None:
             raise FileNotFoundError(f"Template not found: {template_path}")
+
+        if template.shape[0] > screen.shape[0] or template.shape[1] > screen.shape[1]:
+            return []
 
         result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
         locations = np.where(result >= threshold)

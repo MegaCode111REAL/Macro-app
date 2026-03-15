@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 import platform
+from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -20,9 +22,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from automa.core.app_settings import AppSettings
 from automa.core.macro_engine import MacroEngine
 from automa.core.macro_recorder import MacroRecorder
-from automa.core.app_settings import AppSettings
 from automa.core.macro_store import MacroStore
 from automa.core.models import Macro, MacroGroup
 from automa.core.trigger_system import TriggerSystem
@@ -95,6 +97,11 @@ class MainWindow(QMainWindow):
         self._show_first_launch_instructions()
         self._log("Application loaded")
 
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt API)
+        self.engine.stop()
+        self.trigger_system.stop()
+        self.recorder.stop(on_log=None)
+        super().closeEvent(event)
 
     def _show_first_launch_instructions(self) -> None:
         if self.settings.get_bool("permissions_instructions_seen", default=False):
@@ -133,6 +140,14 @@ class MainWindow(QMainWindow):
         )
         self.settings.set_bool("permissions_instructions_seen", True)
 
+    def _safe_call(self, operation_name: str, fn: Callable[[], None], show_dialog: bool = True) -> None:
+        try:
+            fn()
+        except Exception as exc:
+            self._log(f"{operation_name} failed: {exc}")
+            if show_dialog:
+                QMessageBox.warning(self, "Operation failed", f"{operation_name} failed:\n{exc}")
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
         self.addToolBar(toolbar)
@@ -148,16 +163,16 @@ class MainWindow(QMainWindow):
         import_btn = QPushButton("Import")
         export_btn = QPushButton("Export")
 
-        record_btn.clicked.connect(lambda: self.recorder.start(on_log=self._log))
-        stop_record_btn.clicked.connect(self._stop_recording_into_selected_group)
-        play_btn.clicked.connect(self._play_selected_macro)
+        record_btn.clicked.connect(lambda: self._safe_call("Start recording", self._start_recording))
+        stop_record_btn.clicked.connect(lambda: self._safe_call("Stop recording", self._stop_recording_into_selected_group))
+        play_btn.clicked.connect(lambda: self._safe_call("Play macro", self._play_selected_macro))
         stop_btn.clicked.connect(self.engine.stop)
         pause_btn.clicked.connect(self._toggle_pause)
-        trigger_btn.clicked.connect(self._start_triggers)
+        trigger_btn.clicked.connect(lambda: self._safe_call("Start triggers", self._start_triggers))
         trigger_stop_btn.clicked.connect(self.trigger_system.stop)
-        detect_btn.clicked.connect(self._run_image_detection)
-        import_btn.clicked.connect(self._import)
-        export_btn.clicked.connect(self._export)
+        detect_btn.clicked.connect(lambda: self._safe_call("Image detection", self._run_image_detection))
+        import_btn.clicked.connect(lambda: self._safe_call("Import macros", self._import))
+        export_btn.clicked.connect(lambda: self._safe_call("Export macros", self._export))
 
         for button in [
             record_btn,
@@ -172,6 +187,11 @@ class MainWindow(QMainWindow):
             export_btn,
         ]:
             toolbar.addWidget(button)
+
+    def _start_recording(self) -> None:
+        started = self.recorder.start(on_log=self._log)
+        if not started:
+            self._log("Recorder did not start")
 
     def _refresh_group_list(self) -> None:
         self.group_manager.set_groups([group.name for group in self.store.groups])
@@ -239,16 +259,20 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         macro = self.recorder.stop(macro_name=name, on_log=self._log)
-        group.macros.append(macro)
-        self._persist()
-        self._on_group_selected(self.group_manager.list_widget.currentRow())
+        if macro.actions:
+            group.macros.append(macro)
+            self._persist()
+            self._on_group_selected(self.group_manager.list_widget.currentRow())
+        else:
+            self._log("No actions recorded; macro not added")
 
     def _play_selected_macro(self) -> None:
         macro = self._current_macro()
         if not macro:
             return
-        self.engine.play(macro=macro, speed=1.0, loop=False, on_log=self._log)
-        self._log(f"Playing macro: {macro.name}")
+        started = self.engine.play(macro=macro, speed=1.0, loop=False, on_log=self._log)
+        if started:
+            self._log(f"Playing macro: {macro.name}")
 
     def _toggle_pause(self) -> None:
         if self.engine.pause_event.is_set():
@@ -260,7 +284,7 @@ class MainWindow(QMainWindow):
 
     def _start_triggers(self) -> None:
         macros = [macro for group in self.store.groups for macro in group.macros if macro.trigger]
-        self.trigger_system.start(macros=macros, on_trigger=lambda m: self.engine.play(m), on_log=self._log)
+        self.trigger_system.start(macros=macros, on_trigger=lambda m: self.engine.play(m, on_log=self._log), on_log=self._log)
         self._log(f"Trigger system active for {len(macros)} macros")
 
     def _run_image_detection(self) -> None:

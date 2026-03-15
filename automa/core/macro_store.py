@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from automa.core.models import MacroGroup
 
@@ -17,10 +18,26 @@ class MacroStore:
             self.groups = [MacroGroup(name="Default", macros=[])]
             self.save()
             return
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        self.groups = [MacroGroup.from_dict(item) for item in data.get("groups", [])]
-        if not self.groups:
+
+        try:
+            raw = self.path.read_text(encoding="utf-8")
+            data: dict[str, Any] = json.loads(raw)
+        except Exception:
             self.groups = [MacroGroup(name="Default", macros=[])]
+            self.save()
+            return
+
+        groups_data = data.get("groups", []) if isinstance(data, dict) else []
+        parsed_groups: list[MacroGroup] = []
+        for item in groups_data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                parsed_groups.append(MacroGroup.from_dict(item))
+            except Exception:
+                continue
+
+        self.groups = parsed_groups or [MacroGroup(name="Default", macros=[])]
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,8 +45,22 @@ class MacroStore:
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def import_file(self, file_path: Path) -> None:
-        data = json.loads(file_path.read_text(encoding="utf-8"))
-        self.groups = [MacroGroup.from_dict(item) for item in data.get("groups", [])]
+        raw = file_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("Imported macro file must contain a JSON object")
+
+        groups_data = data.get("groups")
+        if not isinstance(groups_data, list):
+            raise ValueError("Imported macro file must contain a 'groups' array")
+
+        parsed_groups: list[MacroGroup] = []
+        for item in groups_data:
+            if not isinstance(item, dict):
+                continue
+            parsed_groups.append(MacroGroup.from_dict(item))
+
+        self.groups = parsed_groups or [MacroGroup(name="Default", macros=[])]
         self.save()
 
     def export_file(self, file_path: Path) -> None:

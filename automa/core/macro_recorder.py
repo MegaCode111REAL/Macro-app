@@ -19,58 +19,89 @@ class MacroRecorder:
         self._mouse_listener: mouse.Listener | None = None
         self._lock = threading.Lock()
 
-    def start(self, on_log: Callable[[str], None] | None = None) -> None:
+    def start(self, on_log: Callable[[str], None] | None = None) -> bool:
+        if self._recording:
+            if on_log:
+                on_log("Recording is already running")
+            return False
+
         self._actions = []
         self._start_time = time.time()
         self._last_event_time = self._start_time
         self._recording = True
 
         def keyboard_press(key: keyboard.Key | keyboard.KeyCode) -> None:
-            if not self._recording:
-                return
-            key_name = self._safe_key_name(key)
-            self._push_delay()
-            self._actions.append(Action(type="keyboard_down", params={"key": key_name}))
+            with self._lock:
+                if not self._recording:
+                    return
+                key_name = self._safe_key_name(key)
+                self._push_delay()
+                self._actions.append(Action(type="keyboard_down", params={"key": key_name}))
 
         def keyboard_release(key: keyboard.Key | keyboard.KeyCode) -> None:
-            if not self._recording:
-                return
-            key_name = self._safe_key_name(key)
-            self._push_delay()
-            self._actions.append(Action(type="keyboard_up", params={"key": key_name}))
+            with self._lock:
+                if not self._recording:
+                    return
+                key_name = self._safe_key_name(key)
+                self._push_delay()
+                self._actions.append(Action(type="keyboard_up", params={"key": key_name}))
 
         def mouse_move(x: int, y: int) -> None:
-            if not self._recording:
-                return
-            self._push_delay()
-            self._actions.append(Action(type="mouse_move", params={"x": x, "y": y}))
+            with self._lock:
+                if not self._recording:
+                    return
+                self._push_delay()
+                self._actions.append(Action(type="mouse_move", params={"x": x, "y": y}))
 
         def mouse_click(x: int, y: int, button: mouse.Button, pressed: bool) -> None:
-            if not self._recording or not pressed:
-                return
-            self._push_delay()
-            self._actions.append(Action(type="mouse_click", params={"x": x, "y": y, "button": button.name}))
+            with self._lock:
+                if not self._recording or not pressed:
+                    return
+                self._push_delay()
+                self._actions.append(Action(type="mouse_click", params={"x": x, "y": y, "button": button.name}))
 
         def mouse_scroll(x: int, y: int, dx: int, dy: int) -> None:
-            if not self._recording:
-                return
-            self._push_delay()
-            self._actions.append(Action(type="mouse_scroll", params={"amount": dy * 120}))
+            with self._lock:
+                if not self._recording:
+                    return
+                self._push_delay()
+                self._actions.append(Action(type="mouse_scroll", params={"amount": dy * 120}))
 
-        self._keyboard_listener = keyboard.Listener(on_press=keyboard_press, on_release=keyboard_release)
-        self._mouse_listener = mouse.Listener(on_move=mouse_move, on_click=mouse_click, on_scroll=mouse_scroll)
-        self._keyboard_listener.start()
-        self._mouse_listener.start()
+        try:
+            self._keyboard_listener = keyboard.Listener(on_press=keyboard_press, on_release=keyboard_release)
+            self._mouse_listener = mouse.Listener(on_move=mouse_move, on_click=mouse_click, on_scroll=mouse_scroll)
+            self._keyboard_listener.start()
+            self._mouse_listener.start()
+        except Exception as exc:
+            self._recording = False
+            if on_log:
+                on_log(f"Failed to start recorder: {exc}")
+            return False
+
         if on_log:
             on_log("Recording started")
+        return True
 
     def stop(self, macro_name: str = "recorded_macro", on_log: Callable[[str], None] | None = None) -> Macro:
-        self._recording = False
+        with self._lock:
+            self._recording = False
+
         if self._keyboard_listener:
-            self._keyboard_listener.stop()
+            try:
+                self._keyboard_listener.stop()
+            except Exception:
+                pass
+            self._keyboard_listener = None
+
         if self._mouse_listener:
-            self._mouse_listener.stop()
-        macro = Macro(name=macro_name, actions=list(self._actions))
+            try:
+                self._mouse_listener.stop()
+            except Exception:
+                pass
+            self._mouse_listener = None
+
+        safe_name = macro_name.strip() or "recorded_macro"
+        macro = Macro(name=safe_name, actions=list(self._actions))
         if on_log:
             on_log(f"Recording stopped. Captured {len(self._actions)} actions")
         return macro
