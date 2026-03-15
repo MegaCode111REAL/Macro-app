@@ -14,7 +14,7 @@ class RobustnessTests(unittest.TestCase):
             path.write_text("{invalid-json", encoding="utf-8")
             store = MacroStore(path)
             self.assertEqual(len(store.groups), 1)
-            self.assertEqual(store.groups[0].name, "Default")
+            self.assertEqual(store.groups[0].name, "Default Setup")
 
 
 if __name__ == "__main__":

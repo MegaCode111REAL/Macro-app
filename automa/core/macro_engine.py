@@ -68,7 +68,8 @@ class MacroEngine:
 
     def _run_action(self, action_type: str, params: dict, speed: float) -> None:
         if action_type == "delay":
-            delay = max(0.0, float(params.get("time", 0.1)))
+            delay_val = params.get("time", params.get("ms", 100) / 1000)
+            delay = max(0.0, float(delay_val))
             time.sleep(delay / speed)
         elif action_type == "mouse_move":
             self.mouse.move(int(params.get("x", 0)), int(params.get("y", 0)), duration=0)
@@ -90,6 +91,24 @@ class MacroEngine:
             self.keyboard.release(str(params.get("key", "")))
         elif action_type == "text":
             self.keyboard.type_text(str(params.get("value", "")))
+        elif action_type == "keyboard":
+            key = str(params.get("key", ""))
+            action = str(params.get("action", "down"))
+            if action == "down":
+                self.keyboard.press(key)
+            elif action == "up":
+                self.keyboard.release(key)
+            else:
+                self.keyboard.tap(key)
+        elif action_type == "mouse":
+            action = str(params.get("action", "down"))
+            button = str(params.get("button", "left"))
+            x = int(params.get("x", 0))
+            y = int(params.get("y", 0))
+            if action == "move":
+                self.mouse.move(x, y, duration=0)
+            else:
+                self.mouse.click(button=button, x=x, y=y)
 
     def stop(self) -> None:
         self.stop_event.set()

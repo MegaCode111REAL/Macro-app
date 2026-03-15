@@ -1,336 +1,319 @@
 from __future__ import annotations
 
-import platform
+import getpass
 from pathlib import Path
-from typing import Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
-    QSplitter,
-    QToolBar,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from automa.core.app_settings import AppSettings
-from automa.core.macro_engine import MacroEngine
-from automa.core.macro_recorder import MacroRecorder
 from automa.core.macro_store import MacroStore
-from automa.core.models import Macro, MacroGroup
-from automa.core.trigger_system import TriggerSystem
-from automa.gui.group_manager import GroupManager
-from automa.gui.macro_editor import MacroEditor
-from automa.modules.image_detection import ImageDetector
+from automa.core.models import Macro, Setup
+from automa.gui.macro_editor import MacroEditorWindow
 
 
 class MainWindow(QMainWindow):
     def __init__(self, store: MacroStore) -> None:
         super().__init__()
-        self.setWindowTitle("automa")
-        self.resize(1400, 800)
         self.store = store
         self.settings = AppSettings()
+        self.current_setup_index = -1
+        self._open_editors: list[MacroEditorWindow] = []
 
-        self.engine = MacroEngine()
-        self.recorder = MacroRecorder()
-        self.trigger_system = TriggerSystem()
-        self.image_detector = ImageDetector()
+        self.setWindowTitle("automa")
+        self.resize(1024, 720)
+        self.setAcceptDrops(True)
 
-        self.group_manager = GroupManager()
-        self.group_manager.setMaximumWidth(260)
-        self.group_manager.group_selected.connect(self._on_group_selected)
-        self.group_manager.create_group.connect(self._create_group)
-        self.group_manager.delete_group.connect(self._delete_group)
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self.setup_list_view = self._build_setup_list_view()
+        self.setup_editor_view = self._build_setup_editor_view()
+
+        self.stack.addWidget(self.setup_list_view)
+        self.stack.addWidget(self.setup_editor_view)
+        self._refresh_setups()
+        self.show_setups_view()
+
+    def _build_header_buttons(self, include_import: bool = True) -> tuple[QWidget, dict[str, QPushButton]]:
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        names = ["New", "Delete", "Rename"] + (["Import"] if include_import else []) + ["Export"]
+        buttons: dict[str, QPushButton] = {}
+        for name in names:
+            btn = QPushButton(name)
+            row.addWidget(btn)
+            buttons[name.lower()] = btn
+        row.addStretch(1)
+        return row_widget, buttons
+
+    def _build_setup_list_view(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+
+        title = QLabel("Setups")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        layout.addWidget(title)
+
+        btn_row, buttons = self._build_header_buttons(include_import=True)
+        layout.addWidget(btn_row)
+
+        self.setup_list = QListWidget()
+        layout.addWidget(self.setup_list)
+
+        buttons["new"].clicked.connect(self._new_setup)
+        buttons["delete"].clicked.connect(self._delete_setup)
+        buttons["rename"].clicked.connect(self._rename_setup)
+        buttons["import"].clicked.connect(self._import_dialog)
+        buttons["export"].clicked.connect(self._export_selected_setup)
+
+        self.setup_list.itemClicked.connect(self._setup_row_clicked)
+        return root
+
+    def _build_setup_editor_view(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+
+        self.setup_editor_title = QLabel("Setup")
+        self.setup_editor_title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        layout.addWidget(self.setup_editor_title)
+
+        btn_row, buttons = self._build_header_buttons(include_import=False)
+        layout.addWidget(btn_row)
 
         self.macro_list = QListWidget()
-        self.macro_list.currentRowChanged.connect(self._on_macro_selected)
+        layout.addWidget(self.macro_list)
 
-        self.editor = MacroEditor()
-        self.editor.macro_changed.connect(self._persist)
-        self.editor.actions_list.model().rowsMoved.connect(lambda *_: self.editor.commit_reorder())
+        back_btn = QPushButton("Back to Setups")
+        back_btn.clicked.connect(self.show_setups_view)
+        layout.addWidget(back_btn)
 
-        self.log_output = QPlainTextEdit()
-        self.log_output.setReadOnly(True)
-        self.log_output.setMaximumHeight(200)
+        buttons["new"].clicked.connect(self._new_macro)
+        buttons["delete"].clicked.connect(self._delete_macro)
+        buttons["rename"].clicked.connect(self._rename_macro)
+        buttons["export"].clicked.connect(self._export_selected_setup)
+        self.macro_list.itemClicked.connect(self._macro_clicked)
+        return root
 
-        center_layout = QVBoxLayout()
-        center_layout.addWidget(QLabel("Macros"))
-        center_layout.addWidget(self.macro_list)
+    def show_setups_view(self) -> None:
+        self.stack.setCurrentWidget(self.setup_list_view)
 
-        macro_buttons = QHBoxLayout()
-        add_macro_btn = QPushButton("Add Macro")
-        del_macro_btn = QPushButton("Delete Macro")
-        add_macro_btn.clicked.connect(self._create_macro)
-        del_macro_btn.clicked.connect(self._delete_macro)
-        macro_buttons.addWidget(add_macro_btn)
-        macro_buttons.addWidget(del_macro_btn)
-        center_layout.addLayout(macro_buttons)
-
-        center_widget = QWidget()
-        center_widget.setLayout(center_layout)
-
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.group_manager)
-        splitter.addWidget(center_widget)
-        splitter.addWidget(self.editor)
-        splitter.setSizes([200, 360, 800])
-
-        root = QWidget()
-        root_layout = QVBoxLayout(root)
-        root_layout.addWidget(splitter)
-        root_layout.addWidget(QLabel("Console / Logs"))
-        root_layout.addWidget(self.log_output)
-
-        self.setCentralWidget(root)
-        self._build_toolbar()
-        self._refresh_group_list()
-        self._show_first_launch_instructions()
-        self._log("Application loaded")
-
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt API)
-        self.engine.stop()
-        self.trigger_system.stop()
-        self.recorder.stop(on_log=None)
-        super().closeEvent(event)
-
-    def _show_first_launch_instructions(self) -> None:
-        if self.settings.get_bool("permissions_instructions_seen", default=False):
+    def show_setup_editor(self, index: int) -> None:
+        if index < 0 or index >= len(self.store.setups):
             return
+        self.current_setup_index = index
+        self.setup_editor_title.setText(self.store.setups[index].name)
+        self._refresh_macros(index)
+        self.stack.setCurrentWidget(self.setup_editor_view)
 
-        os_name = platform.system()
-        details = {
-            "Windows": (
-                "Windows permissions setup:\n"
-                "1) Start automa once as your normal user.\n"
-                "2) If global hotkeys or recording fail, restart automa as Administrator.\n"
-                "3) Allow desktop/input access if your security software prompts."
-            ),
-            "Linux": (
-                "Linux permissions setup:\n"
-                "1) X11 is recommended for global hooks and macro playback.\n"
-                "2) On Wayland, keyboard/mouse hooks may be blocked by compositor policy.\n"
-                "3) Ensure your user can access input devices and screen capture APIs."
-            ),
-            "Darwin": (
-                "macOS permissions setup:\n"
-                "1) Open System Settings → Privacy & Security.\n"
-                "2) Enable automa in Accessibility.\n"
-                "3) Enable automa in Input Monitoring.\n"
-                "4) Enable automa in Screen Recording for image detection/screen capture.\n"
-                "5) Restart automa after enabling permissions."
-            ),
-        }
-        message = details.get(os_name, "Grant input and screen permissions required by your OS.")
+    def _refresh_setups(self) -> None:
+        self.store.ensure_single_active()
+        self.setup_list.clear()
+        for idx, setup in enumerate(self.store.setups):
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, idx)
+            self.setup_list.addItem(item)
+            widget = self._setup_row_widget(setup, idx)
+            item.setSizeHint(widget.sizeHint())
+            self.setup_list.setItemWidget(item, widget)
 
-        QMessageBox.information(
-            self,
-            "First launch: required permissions",
-            "automa needs OS-level permissions for global hotkeys, input automation, "
-            "and screen capture.\n\n" + message,
-        )
-        self.settings.set_bool("permissions_instructions_seen", True)
+    def _setup_row_widget(self, setup: Setup, index: int) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 8, 8, 8)
 
-    def _safe_call(self, operation_name: str, fn: Callable[[], None], show_dialog: bool = True) -> None:
-        try:
-            fn()
-        except Exception as exc:
-            self._log(f"{operation_name} failed: {exc}")
-            if show_dialog:
-                QMessageBox.warning(self, "Operation failed", f"{operation_name} failed:\n{exc}")
+        checkbox = QPushButton("☑" if setup.active else "☐")
+        checkbox.setFixedWidth(32)
+        checkbox.clicked.connect(lambda: self._set_active_setup(index))
 
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        self.addToolBar(toolbar)
+        text_col = QWidget()
+        text_layout = QVBoxLayout(text_col)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        name_label = QLabel(setup.name)
+        author_label = QLabel(setup.author)
+        author_label.setStyleSheet("font-size: 11px; color: #777;")
+        text_layout.addWidget(name_label)
+        text_layout.addWidget(author_label)
 
-        record_btn = QPushButton("Record")
-        stop_record_btn = QPushButton("Stop Rec")
-        play_btn = QPushButton("Play")
-        stop_btn = QPushButton("Stop")
-        pause_btn = QPushButton("Pause/Resume")
-        trigger_btn = QPushButton("Start Triggers")
-        trigger_stop_btn = QPushButton("Stop Triggers")
-        detect_btn = QPushButton("Detect Image")
-        import_btn = QPushButton("Import")
-        export_btn = QPushButton("Export")
+        arrow = QLabel(">")
+        arrow.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
 
-        record_btn.clicked.connect(lambda: self._safe_call("Start recording", self._start_recording))
-        stop_record_btn.clicked.connect(lambda: self._safe_call("Stop recording", self._stop_recording_into_selected_group))
-        play_btn.clicked.connect(lambda: self._safe_call("Play macro", self._play_selected_macro))
-        stop_btn.clicked.connect(self.engine.stop)
-        pause_btn.clicked.connect(self._toggle_pause)
-        trigger_btn.clicked.connect(lambda: self._safe_call("Start triggers", self._start_triggers))
-        trigger_stop_btn.clicked.connect(self.trigger_system.stop)
-        detect_btn.clicked.connect(lambda: self._safe_call("Image detection", self._run_image_detection))
-        import_btn.clicked.connect(lambda: self._safe_call("Import macros", self._import))
-        export_btn.clicked.connect(lambda: self._safe_call("Export macros", self._export))
+        layout.addWidget(checkbox)
+        layout.addWidget(text_col, 1)
+        layout.addWidget(arrow)
+        return row
 
-        for button in [
-            record_btn,
-            stop_record_btn,
-            play_btn,
-            stop_btn,
-            pause_btn,
-            trigger_btn,
-            trigger_stop_btn,
-            detect_btn,
-            import_btn,
-            export_btn,
-        ]:
-            toolbar.addWidget(button)
-
-    def _start_recording(self) -> None:
-        started = self.recorder.start(on_log=self._log)
-        if not started:
-            self._log("Recorder did not start")
-
-    def _refresh_group_list(self) -> None:
-        self.group_manager.set_groups([group.name for group in self.store.groups])
-
-    def _on_group_selected(self, index: int) -> None:
+    def _refresh_macros(self, setup_index: int) -> None:
         self.macro_list.clear()
-        if index < 0 or index >= len(self.store.groups):
-            return
-        group = self.store.groups[index]
-        self.macro_list.addItems([macro.name for macro in group.macros])
-        if group.macros:
-            self.macro_list.setCurrentRow(0)
+        setup = self.store.setups[setup_index]
+        for idx, macro in enumerate(setup.macros):
+            keybind = macro.keybind or ""
+            item = QListWidgetItem(f"{keybind:<12} {macro.name}")
+            item.setData(Qt.UserRole, idx)
+            self.macro_list.addItem(item)
 
-    def _on_macro_selected(self, index: int) -> None:
-        group = self._current_group()
-        if not group or index < 0 or index >= len(group.macros):
-            self.editor.set_macro(None)
-            return
-        self.editor.set_macro(group.macros[index])
+    def _selected_setup_index(self) -> int:
+        item = self.setup_list.currentItem()
+        if item is None:
+            return -1
+        return int(item.data(Qt.UserRole))
 
-    def _create_group(self, name: str) -> None:
-        self.store.groups.append(MacroGroup(name=name, macros=[]))
-        self._persist()
-        self._refresh_group_list()
-        self._log(f"Added group: {name}")
+    def _new_setup(self) -> None:
+        name, ok = QInputDialog.getText(self, "New Setup", "Setup name:")
+        if not ok or not name.strip():
+            return
+        author = getpass.getuser() or "Unknown"
+        self.store.setups.append(Setup(name=name.strip(), author=author, macros=[], active=False))
+        self.store.ensure_single_active()
+        self.store.save()
+        self._refresh_setups()
 
-    def _delete_group(self, index: int) -> None:
-        if len(self.store.groups) <= 1 or index < 0:
+    def _delete_setup(self) -> None:
+        idx = self._selected_setup_index()
+        if idx < 0 or idx >= len(self.store.setups):
             return
-        name = self.store.groups[index].name
-        self.store.groups.pop(index)
-        self._persist()
-        self._refresh_group_list()
-        self._log(f"Deleted group: {name}")
+        self.store.setups.pop(idx)
+        if not self.store.setups:
+            self.store.setups.append(Setup(name="Default Setup", author="Unknown", macros=[], active=True))
+        self.store.ensure_single_active()
+        self.store.save()
+        self._refresh_setups()
 
-    def _create_macro(self) -> None:
-        group = self._current_group()
-        if not group:
+    def _rename_setup(self) -> None:
+        idx = self._selected_setup_index()
+        if idx < 0:
             return
-        name, ok = QInputDialog.getText(self, "Create Macro", "Macro name:")
-        if not (ok and name.strip()):
+        current = self.store.setups[idx].name
+        name, ok = QInputDialog.getText(self, "Rename Setup", "Setup name:", text=current)
+        if ok and name.strip():
+            self.store.setups[idx].name = name.strip()
+            self.store.save()
+            self._refresh_setups()
+            if self.current_setup_index == idx:
+                self.setup_editor_title.setText(name.strip())
+
+    def _set_active_setup(self, index: int) -> None:
+        for i, setup in enumerate(self.store.setups):
+            setup.active = i == index
+        self.store.save()
+        self._refresh_setups()
+
+    def _setup_row_clicked(self, item: QListWidgetItem) -> None:
+        idx = int(item.data(Qt.UserRole))
+        self.show_setup_editor(idx)
+
+    def _new_macro(self) -> None:
+        if self.current_setup_index < 0:
             return
-        macro = Macro(name=name.strip(), actions=[])
-        group.macros.append(macro)
-        self._persist()
-        self._on_group_selected(self.group_manager.list_widget.currentRow())
-        self._log(f"Added macro: {name}")
+        name, ok = QInputDialog.getText(self, "New Macro", "Macro name:")
+        if not ok or not name.strip():
+            return
+        macro = Macro(name=name.strip(), author=getpass.getuser() or "Unknown", keybind="", actions=[])
+        self.store.setups[self.current_setup_index].macros.append(macro)
+        self.store.save()
+        self._refresh_macros(self.current_setup_index)
 
     def _delete_macro(self) -> None:
-        group = self._current_group()
+        if self.current_setup_index < 0:
+            return
         row = self.macro_list.currentRow()
-        if not group or row < 0:
+        setup = self.store.setups[self.current_setup_index]
+        if row < 0 or row >= len(setup.macros):
             return
-        name = group.macros[row].name
-        group.macros.pop(row)
-        self._persist()
-        self._on_group_selected(self.group_manager.list_widget.currentRow())
-        self._log(f"Deleted macro: {name}")
-
-    def _stop_recording_into_selected_group(self) -> None:
-        group = self._current_group()
-        if not group:
-            return
-        name, ok = QInputDialog.getText(self, "Stop Recording", "Macro name:", text="recorded_macro")
-        if not ok:
-            return
-        macro = self.recorder.stop(macro_name=name, on_log=self._log)
-        if macro.actions:
-            group.macros.append(macro)
-            self._persist()
-            self._on_group_selected(self.group_manager.list_widget.currentRow())
-        else:
-            self._log("No actions recorded; macro not added")
-
-    def _play_selected_macro(self) -> None:
-        macro = self._current_macro()
-        if not macro:
-            return
-        started = self.engine.play(macro=macro, speed=1.0, loop=False, on_log=self._log)
-        if started:
-            self._log(f"Playing macro: {macro.name}")
-
-    def _toggle_pause(self) -> None:
-        if self.engine.pause_event.is_set():
-            self.engine.resume()
-            self._log("Playback resumed")
-        else:
-            self.engine.pause()
-            self._log("Playback paused")
-
-    def _start_triggers(self) -> None:
-        macros = [macro for group in self.store.groups for macro in group.macros if macro.trigger]
-        self.trigger_system.start(macros=macros, on_trigger=lambda m: self.engine.play(m, on_log=self._log), on_log=self._log)
-        self._log(f"Trigger system active for {len(macros)} macros")
-
-    def _run_image_detection(self) -> None:
-        template, _ = QFileDialog.getOpenFileName(self, "Select Template", filter="Images (*.png *.jpg *.jpeg)")
-        if not template:
-            return
-        result = self.image_detector.find_best_match(Path(template), threshold=0.8)
-        if not result:
-            QMessageBox.information(self, "Image Detection", "No image match found.")
-            return
-        QMessageBox.information(
-            self,
-            "Image Detection",
-            f"Match score {result.score:.2f} at center {result.center}",
-        )
-
-    def _import(self) -> None:
-        file_path, _ = QFileDialog.getOpenFileName(self, "Import Macro Set", filter="JSON files (*.json)")
-        if not file_path:
-            return
-        self.store.import_file(Path(file_path))
-        self._refresh_group_list()
-        self._log(f"Imported: {file_path}")
-
-    def _export(self) -> None:
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export Macro Set", filter="JSON files (*.json)")
-        if not file_path:
-            return
-        self.store.export_file(Path(file_path))
-        self._log(f"Exported: {file_path}")
-
-    def _persist(self) -> None:
+        setup.macros.pop(row)
         self.store.save()
+        self._refresh_macros(self.current_setup_index)
 
-    def _current_group(self) -> MacroGroup | None:
-        index = self.group_manager.list_widget.currentRow()
-        if index < 0 or index >= len(self.store.groups):
-            return None
-        return self.store.groups[index]
-
-    def _current_macro(self) -> Macro | None:
-        group = self._current_group()
+    def _rename_macro(self) -> None:
+        if self.current_setup_index < 0:
+            return
         row = self.macro_list.currentRow()
-        if not group or row < 0 or row >= len(group.macros):
-            return None
-        return group.macros[row]
+        setup = self.store.setups[self.current_setup_index]
+        if row < 0 or row >= len(setup.macros):
+            return
+        current = setup.macros[row].name
+        name, ok = QInputDialog.getText(self, "Rename Macro", "Macro name:", text=current)
+        if ok and name.strip():
+            setup.macros[row].name = name.strip()
+            self.store.save()
+            self._refresh_macros(self.current_setup_index)
 
-    def _log(self, message: str) -> None:
-        self.log_output.appendPlainText(message)
+    def _macro_clicked(self, item: QListWidgetItem) -> None:
+        if self.current_setup_index < 0:
+            return
+        idx = int(item.data(Qt.UserRole))
+        setup = self.store.setups[self.current_setup_index]
+        if idx < 0 or idx >= len(setup.macros):
+            return
+        editor = MacroEditorWindow(setup.macros[idx], self.store)
+        editor.macro_saved.connect(lambda: self._refresh_macros(self.current_setup_index))
+        editor.show()
+        self._open_editors.append(editor)
+
+    def _export_selected_setup(self) -> None:
+        idx = self._selected_setup_index() if self.stack.currentWidget() is self.setup_list_view else self.current_setup_index
+        if idx < 0 or idx >= len(self.store.setups):
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export Setup", filter="automa Setup (*.ats)")
+        if not file_path:
+            return
+        path = file_path if file_path.endswith(".ats") else f"{file_path}.ats"
+        self.store.export_setup(self.store.setups[idx], Path(path))
+
+    def _import_dialog(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(self, "Import", filter="automa files (*.ats *.atm)")
+        if not file_path:
+            return
+        self._import_path(Path(file_path))
+
+    def _import_path(self, path: Path) -> None:
+        ext = path.suffix.lower()
+        if ext == ".ats":
+            self.store.import_setup(path)
+            self._refresh_setups()
+            return
+        if ext == ".atm":
+            macro = self.store.import_macro(path)
+            setup_names = [s.name for s in self.store.setups]
+            if not setup_names:
+                self.store.setups.append(Setup(name="Default Setup", author="Unknown", macros=[], active=True))
+                setup_names = [self.store.setups[0].name]
+            setup_name, ok = QInputDialog.getItem(self, "Choose Setup", "Add macro to setup:", setup_names, 0, False)
+            if not ok:
+                return
+            index = setup_names.index(setup_name)
+            self.store.setups[index].macros.append(macro)
+            self.store.save()
+            self._refresh_setups()
+            if self.current_setup_index == index:
+                self._refresh_macros(index)
+            return
+        QMessageBox.warning(self, "Import", "Unsupported file type")
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self._import_path(Path(url.toLocalFile()))
+        event.acceptProposedAction()

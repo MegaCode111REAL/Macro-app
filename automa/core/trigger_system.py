@@ -47,7 +47,7 @@ class TriggerSystem:
     def _worker(self, macros: list[Macro], on_trigger: Callable[[Macro], None], on_log: Callable[[str], None] | None) -> None:
         while not self._stop_event.is_set():
             for macro in macros:
-                trigger = macro.trigger
+                trigger = getattr(macro, "trigger", None)
                 if not trigger:
                     continue
                 try:
