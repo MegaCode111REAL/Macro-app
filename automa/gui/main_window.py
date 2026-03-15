@@ -32,7 +32,7 @@ from automa.modules.image_detection import ImageDetector
 class MainWindow(QMainWindow):
     def __init__(self, store: MacroStore) -> None:
         super().__init__()
-        self.setWindowTitle("Automa")
+        self.setWindowTitle("automa")
         self.resize(1400, 800)
         self.store = store
 

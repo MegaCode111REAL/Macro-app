@@ -1,4 +1,4 @@
-# Automa
+# automa
 
 Cross-platform desktop macro automation platform written in Python, with a modular architecture for recording, playback, editing, trigger-based automation, and image pattern detection.
 
