@@ -1,4 +1,4 @@
-# Macro-app
+# Automa
 
 Cross-platform desktop macro automation platform written in Python, with a modular architecture for recording, playback, editing, trigger-based automation, and image pattern detection.
 
@@ -16,7 +16,7 @@ Cross-platform desktop macro automation platform written in Python, with a modul
 ## Project Structure
 
 ```text
-automation_app/
+automa/
   main.py
   gui/
     main_window.py
@@ -50,7 +50,7 @@ pip install -r requirements.txt
 ## Run
 
 ```bash
-python -m automation_app.main
+python -m automa.main
 ```
 
 ## JSON Macro Format
